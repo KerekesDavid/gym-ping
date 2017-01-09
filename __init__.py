@@ -6,8 +6,8 @@ register(
     timestep_limit=200,
 )
 
-# register(
-#     id='PingPongPos-v0',
-#     entry_point='gym.envs.ping:PingEnvPos',
-#     timestep_limit=200,
-# )
+register(
+    id='PingPongPos-v0',
+    entry_point='gym.envs.ping:PingEnvPos',
+    timestep_limit=200,
+)

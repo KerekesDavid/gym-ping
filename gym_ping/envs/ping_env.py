@@ -4,7 +4,7 @@
 #    http://pyode.sourceforge.net/tutorials/tutorial3.html
 
 """
-Copyright (c) 2016 Dávid Kerekes - https://github.com/KerekesDavid/ping-env
+Copyright (c) 2016-2017 Dávid Kerekes - https://github.com/KerekesDavid/ping-env
 
  Permission is hereby granted, free of charge, to any person
  obtaining a copy of this software and associated documentation
@@ -647,6 +647,7 @@ class PingEnvPos(gym.Env):
         nearSecondHit = 5
         farSecondHit = 6
         invalidHit = 7
+        invalidBounce = 8
 
     def __init__(self):
         # OpenGL variables
@@ -654,11 +655,11 @@ class PingEnvPos(gym.Env):
         self.wp_width = 200
         self.wp_x = 0
         self.wp_y = 0
-        self.windowname = "PingEnv"
+        self.windowname = "PingEnvPos"
         self.window = None
         self.fov = 28
-        self.cv1 = [0.2, 5.0, 1.0, 0.2, 1.0, 0, 0, 1, 0]
-        self.cv2 = [3.0, 1.0, 0.0, 0.2, 1.0, 0, 0, 1, 0]
+        self.cv1 = [0.2, 4.5, 0.001, 0.2, 1.0, 0, 0, 1, 0]
+        self.cv2 = [3.5, 0.85, 0.0, 0.2, 1.0, 0, 0, 1, 0]
 
         # ODE variables
         self.world = ode.World()
@@ -686,7 +687,8 @@ class PingEnvPos(gym.Env):
         self.world.setCFM(1E-5)
 
         # Output variables
-        self.observation = np.ones((9, ), dtype='float32')  # 3*vec3
+        self.rawdata = np.empty((self.wp_height, self.wp_width, 3), dtype='uint8')
+        self.observation = np.ones((13, ), dtype='float32')  # 3*vec3 + 1*quat
         self.reward = 0
         self.done = False
         self.info = dict()
@@ -694,18 +696,19 @@ class PingEnvPos(gym.Env):
         self.observation_space = spaces.Box(self.observation * -10.0, self.observation * 10.0)
 
         # Valid bat bositions
-        self.posClipMin = [0.4, 0.5, -1.0]
-        self.posClipMax = [1.7, 1.7, 1.0]
+        self.posClipMin = [0.6, 0.6, -1.0]
+        self.posClipMax = [1.8, 1.0, 1.0]
 
         # Valid bat velocities
-        self.action_space = spaces.Box(np.ones(3) * -0.5, np.ones(3) * 0.5)
+        self.action_space = spaces.Box(np.ones(6) * -1.2, np.ones(6) * 1.2)
 
         # Set up static objects
         #   Create table
-        self.tableFar, self.tableNear = self._create_table()
+        self.tableNet, self.tableFar, self.tableNear = self._create_table()
 
         #   Create planes to chatch balls
         self.hitWall = self._create_hit_wall()
+        self.hitFloor = self._create_hit_floor()
 
         #   Create Bat
         self.bat = self._create_bat()
@@ -822,9 +825,9 @@ class PingEnvPos(gym.Env):
                          self.random.gauss(-1.4 * self.startPos[1], 0.1),
                          self.random.gauss(0, 0.5) - self.startPos[2]*1.5)
         body.setLinearVel(self.startVel)
-        theta = self.random.uniform(0, 2 * pi)
-        ct = cos(theta)
-        st = sin(theta)
+        theta = self.random.uniform(0, 2 * math.pi)
+        ct = math.cos(theta)
+        st = math.sin(theta)
         body.setRotation([ct, 0., -st, 0., 1., 0., st, 0., ct])
         self.bodies.append(body)
         self.geoms.append(geom)
@@ -843,6 +846,7 @@ class PingEnvPos(gym.Env):
         zero_rot = np.full((9, 1), np.finfo('float32').eps, dtype='float32')
         zero_rot[4] = 1.0
 
+        # Near table
         body1, geom1 = self._create_box(1000, 2.74 / 2.0, 0.06, 1.525)  # asztal hivatalos meretei
         body1.setPosition([2.74/4, 0.76, 0])  # 0.76m hivatalos magassag
         body1.setRotation(zero_rot)
@@ -850,6 +854,7 @@ class PingEnvPos(gym.Env):
         self.bodies.append(body1)
         self.geoms.append(geom1)
 
+        # Far table
         body2, geom2 = self._create_box(1000, 2.74 / 2.0, 0.06, 1.525)  # asztal hivatalos meretei
         body2.setPosition([-2.74/4, 0.76, 0])  # 0.76m hivatalos magassag
         body2.setRotation(zero_rot)
@@ -857,6 +862,7 @@ class PingEnvPos(gym.Env):
         self.bodies.append(body2)
         self.geoms.append(geom2)
 
+        # Net
         body3, geom3 = self._create_box(1000, 0.01, 0.1545, 1.525)  # halo
         body3.setPosition([0, 0.76 + 0.03 + 0.1545/2, 0])  # 0.76m hivatalos magassag
         body3.setRotation(zero_rot)
@@ -864,13 +870,28 @@ class PingEnvPos(gym.Env):
         self.bodies.append(body3)
         self.geoms.append(geom3)
 
-        return geom2, geom1
+        return geom3, geom2, geom1
 
     def _create_hit_wall(self):
 
-        body, geom = self._create_box(1000, 10, 0.01, 10)
-        body.setPosition([2.5, 0.76, 0])
+        body, geom = self._create_box(100, 100, 0.01, 10)
+        body.setPosition([1.8, 0.76, 0])
         body.setRotation([0, -1, 0, 1, 0, 0, 0, 0, 1])
+        body.setKinematic()
+        body.visible = False
+        self.bodies.append(body)
+        self.geoms.append(geom)
+
+        return geom
+
+    def _create_hit_floor(self):
+
+        zero_rot = np.full((9, 1), np.finfo('float32').eps, dtype='float32')
+        zero_rot[4] = 1.0
+
+        body, geom = self._create_box(1000, 1000, 0.01, 10)
+        body.setPosition([0.0, 0.40, 0])
+        body.setRotation(zero_rot)
         body.setKinematic()
         body.visible = False
         self.bodies.append(body)
@@ -881,7 +902,7 @@ class PingEnvPos(gym.Env):
     def _create_bat(self):
 
         body, geom = self._create_box(1000, 0.158, 0.01, 0.150)
-        body.setPosition([1.5, 0.7, 0.0])
+        body.setPosition([1.5, 0.8, 0.0])
         body.setRotation([0, -1, 0, 1, 0, 0, 0, 0, 1])  # TODO and Gaussian rotaion
         body.setKinematic()
         body.visible = True
@@ -913,28 +934,34 @@ class PingEnvPos(gym.Env):
             j = ode.ContactJoint(self.world, self.contactGroup, c)
             j.attach(geom1.getBody(), geom2.getBody())
             if {self.lastBall} <= gset:
-                if {self.hitWall} <= gset:
+                if not {self.tableNet, self.hitFloor}.isdisjoint(gset):
+                        self.hitState = self.BallState.invalidBounce
+                elif {self.hitWall} <= gset:
                     if self.hitState == self.BallState.nearHit:
                         self.hitState = self.BallState.wallHit
+                    else:
+                        self.hitState = self.BallState.invalidBounce
                 elif {self.tableFar} <= gset:
                     if self.hitState == self.BallState.noneHit:
                         self.hitState = self.BallState.farHit
-                    elif self.hitState == self.BallState.nearSecondHit:
+                    elif self.hitState == self.BallState.batHit:
                         self.hitState = self.BallState.farSecondHit
                     else:
-                        self.hitState = self.BallState.invalidHit
+                        self.hitState = self.BallState.invalidBounce
                 elif {self.tableNear} <= gset:
                     if self.hitState == self.BallState.farHit:
                         self.hitState = self.BallState.nearHit
                     elif self.hitState == self.BallState.batHit:
                         self.hitState = self.BallState.nearSecondHit
                     else:
-                        self.hitState = self.BallState.invalidHit
+                        self.hitState = self.BallState.invalidBounce
                 elif {self.bat} <= gset:
                     if self.hitState == self.BallState.nearHit:
                         self.hitState = self.BallState.batHit
                     else:
                         self.hitState = self.BallState.invalidHit
+            elif {self.bat, self.tableNear} == gset:
+                self.hitState = self.BallState.invalidHit
             # TODO else:
             #     print('Optimize me out!')
 
@@ -953,7 +980,7 @@ class PingEnvPos(gym.Env):
         self.prevHitState = self.hitState
 
         self.bat.getBody().setLinearVel(action[0:3])
-        # self.bat.getBody().setAngularVel(action[3:6])
+        self.bat.getBody().setAngularVel(action[3:6])
 
         # Simulate
         for i in range(self.sim_div):
@@ -989,6 +1016,7 @@ class PingEnvPos(gym.Env):
 
             while self.counter < 100:
                 self._sim_step([0, 0, 0, 0, 0, 0])
+
                 if self.prevHitState == self.BallState.nearHit and \
                         (self.hitState == self.BallState.wallHit or self.hitState == self.BallState.batHit):
                     break
@@ -999,7 +1027,24 @@ class PingEnvPos(gym.Env):
         self.random.setstate(saved_state)  # In a language without dowhile, how can you flag this as unassinged dear PyCharm?
         self._reset_sim()
 
+    def _set_after_hit_reward(self):
+        while self.counter < 100:
+            self._sim_step([0, 0, 0, 0, 0, 0])
+
+            if self.hitState == self.BallState.farSecondHit:
+                self.reward += 19.0
+                break
+            elif self.hitState == self.BallState.nearSecondHit:
+                # reward hitting (bouncing) back the ball further
+                p1 = np.array(self.lastBall.getBody().getPosition())
+                self.reward += 1.0 + min(max(1.4 - p1[0], 0.0), 1.5)
+                break
+            elif self.hitState == self.BallState.invalidHit or self.hitState == self.BallState.invalidBounce:
+                break
+
     def _draw_scene(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
         # Render stereo image upper part
         glViewport(0, int(self.wp_height / 2), self.wp_width, int(self.wp_height / 2))
         # Projection
@@ -1032,6 +1077,12 @@ class PingEnvPos(gym.Env):
         for b in self.bodies:
             self._draw_body(b)
 
+        glutSwapBuffers()
+        glutPostRedisplay()
+        glutMainLoopEvent()
+        # Get info
+        glReadBuffer(GL_FRONT)
+
     def _step(self, action):
         """Run one timestep of the environment's dynamics. When end of
         episode is reached, you are responsible for calling `reset()`
@@ -1049,11 +1100,25 @@ class PingEnvPos(gym.Env):
 
         # Assert action size
         action = np.array(action)
-        assert all(np.logical_and(self.action_space.low <= action, action <= self.action_space.high))
+        if not all(np.logical_and(self.action_space.low <= action, action <= self.action_space.high)):
+            print('Action is out of bounds, clipping: {0}'.format(action))
+            action = np.clip(action, self.action_space.low, self.action_space.high)
 
         # Step the simulation
         self._sim_step(action)
 
+        # Draw the scene
+        # self._draw_scene()
+
+        self.observation[0:3] = np.reshape(self.lastBall.getBody().getPosition(), (3, ))
+        self.observation[3:6] = np.reshape(self.lastBall.getBody().getLinearVel(), (3, ))
+        self.observation[6:9] = np.reshape(self.bat.getBody().getPosition(), (3, ))
+        self.observation[9:13] = np.reshape(self.bat.getBody().getQuaternion(), (4, ))
+
+        # fill in some info
+        self.info['hitState'] = self.hitState
+
+        # Set rewards
         self.reward = 0.0
 
         p1 = np.array(self.lastBall.getBody().getPosition())
@@ -1068,35 +1133,31 @@ class PingEnvPos(gym.Env):
             self.done = True
             self.info['faliure'] = "Bat out of bounds"
 
+        # Check for invalid state
+        if self.hitState == self.BallState.wallHit:
+            self.reward -= self._dist
+            self.done = True
+        elif self.hitState == self.BallState.invalidHit:
+            self.reward -= 1.0
+            self.done = True
+        elif self.hitState == self.BallState.invalidBounce or self.hitState == self.BallState.nearSecondHit:
+            self.done = True
+
         # Check for succesful hits
         if self.hitState == self.BallState.batHit and self.prevHitState != self.BallState.batHit:
             self.reward += 1.0
+            # Calculate further rewards based on bounces
+            self._set_after_hit_reward()
             self.done = True
         else:
             # Give reward based on change of distance from bat
-            # self.reward += (self._ldist - self._dist)*10
+            # self.reward += (self._ldist - self._dist)
 
             # Stop sim after overshoot
             if (p1 - p2)[0] > 0.1:
                 # Give reward based on distance from bat
                 self.reward -= self._dist
                 self.done = True
-
-        # Check for invalid state
-        if self.hitState == self.BallState.wallHit:
-            self.reward -= self._dist
-            self.done = True
-        elif self.hitState == self.BallState.invalidHit:
-            self.reward -= self._dist
-            self.done = True
-
-        self.observation[0:3] = np.reshape(self.lastBall.getBody().getPosition(), (3, ))
-        self.observation[3:6] = np.reshape(self.lastBall.getBody().getLinearVel(), (3, ))
-        self.observation[6:9] = np.reshape(self.bat.getBody().getPosition(), (3, ))
-        # self.observation[9:13] = np.reshape(self.bat.getBody().getQuaternion(), (4, ))
-
-        # fill in some info
-        self.info['hitState'] = self.hitState
 
         return self.observation.copy(), self.reward, self.done, self.info
 
@@ -1147,16 +1208,12 @@ class PingEnvPos(gym.Env):
 
     def _render(self, mode='rgb_array', close=False):
 
-        # Draw the scene
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._draw_scene()
-        glutSwapBuffers()
-        glutPostRedisplay()
-        glutMainLoopEvent()
-        # Get info
-        glReadBuffer(GL_FRONT)
 
         if mode == 'rgb_array':
             self.rawdata = glReadPixels(0, 0, self.wp_width, self.wp_height,
                                         GL_RGB, GL_UNSIGNED_BYTE, outputType=None)
             return self.rawdata
+        else:
+            pass
+
